@@ -48,3 +48,4 @@ Thumbs.db
 # ===== Large Files =====
 *.mp4
 backend/scripts/model_cache/
+docs/paper/
