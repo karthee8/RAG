@@ -1,0 +1,228 @@
+<USER_REQUEST>
+# AetherRAG — Personal Knowledge Operating System
+### Build Specification v2 (phased, implementable)
+
+This replaces the original all-at-once feature list with a phased spec. Each phase
+is independently shippable. Do not start Phase N+1 until Phase N passes its
+acceptance criteria. Every feature below has a definition, not just a name.
+
+---
+
+## 0. Core Philosophy (unchanged, kept as north star)
+
+Users should feel: **"I am interacting with my own private intelligence system,"**
+not "I am chatting with PDFs."
+
+Non-negotiable constraints:
+
+- **Local-first by default.** Embeddings, vector storage, the LLM, and chat history
+  live on-device unless the user explicitly opts into a cloud model.
+- **No decorative UI.** Every card, button, and widget performs a real action or is
+  removed. If a feature isn't built yet, its entry point is hidden, not stubbed.
+- **Every feature ships with a "no network" behavior**, not just a "works offline
+  when possible" hand-wave. See §1.4.
+
+---
+
+## 1. Technical Foundation (must be decided before any UI work)
+
+The original prompt never specified these — they determine almost every feature
+below, so they're decided here rather than left to be improvised mid-build.
+
+| Layer | Default choice | Notes |
+|---|---|---|
+| LLM runtime | Local via Ollama (e.g. Llama 3.1 8B / Qwen2.5) | Cloud model (Claude/GPT via API) is an opt-in setting, never default |
+| Embeddings | Local sentence-transformer (e.g. `bge-small-en` or `nomic-embed-text`) | Must run on CPU acceptably; GPU optional |
+| Vector store | Local (Chroma or LanceDB, embedded, file-based) | No server process required |
+| Document parsing | `pypdf`/`unstructured` for PDF, `python-docx` for DOCX | Run locally |
+| Website ingestion | Local headless browser fetch (e.g. Playwright) at add-time | Requires network *at ingestion time only*; once crawled, content is fully local and queryable offline |
+| Video/YouTube ingestion | Fetch transcript via network at add-time; store transcript locally | Same offline-after-ingestion pattern as websites |
+| OCR | Local (Tesseract or a local vision model) | No cloud OCR API by default |
+| Audio Overviews (NotebookLM feature) | Local TTS (e.g. Piper/Coqui) | If no local TTS installed, feature shows a clear "install local TTS to enable" state — not a silent failure |
+
+### 1.4 The offline/online rule (resolves the contradiction in v1)
+
+Two categories of feature exist. Every feature in this spec must declare which one it is:
+
+- **Type A — Fully offline.** Works with zero network, always. (Chat over already-ingested content, dashboard, graph, flashcards, quizzes generated from local content, search.)
+- **Type B — Requires network at a specific moment only.** (Adding a new website, adding a new YouTube URL, checking for model updates.) Once ingested, the resulting content becomes Type A.
+
+The UI must visibly label Type B actions (e.g., a small "requires internet" tag on "Add Website") and must degrade gracefully — queue the action and retry, rather than erroring silently — when offline.
+
+---
+
+## 2. Phase 1 — MVP ("Chat with your knowledge, done well")
+
+Ship this first. Nothing else matters if this isn't solid.
+
+**Scope:**
+- Document upload (PDF, DOCX, TXT) — single file and drag-and-drop batch
+- Ingestion pipeline with a real progress UI: `Document → Chunking → Embedding → Vector Indexing → Retrieval Ready`, showing actual counts (e.g. "42/210 chunks embedded"), not a fake progress bar
+- Chat interface over ingested documents
+- Every answer shows **Source Cards**: document name, page/section, exact retrieved chunk, and a similarity/confidence score
+- Clicking a source card opens the source document at the relevant location
+- Document management: search, delete, reindex
+
+**Acceptance criteria:**
+- Upload a 50-page PDF → ask a question whose answer is on page 30 → the answer cites page 30 with a clickable source card that opens the PDF there.
+- Works with wifi off.
+
+---
+
+## 3. Phase 2 — Multi-Source Ingestion
+
+Extends Phase 1's pipeline to other source types. Reuses the same
+chunk → embed → index → retrieve pipeline; do not build parallel pipelines per type.
+
+| Source | Add action | Type | Post-ingestion behavior |
+|---|---|---|---|
+| Websites | Add URL → crawl → parse → chunk | B (at crawl time) | Refresh re-crawls; Preview shows cached snapshot |
+| Videos | Add YouTube URL → fetch transcript | B (at fetch time) | Transcript viewer, reindex, delete |
+| Images | Upload → OCR + captioning | A (OCR/captioning run locally) | Semantic image search via caption embeddings |
+
+**Acceptance criteria:** add one of each source type, turn off wifi, confirm all three are fully searchable and citable offline.
+
+---
+
+## 4. Phase 3 — Workspace Features (ChatGPT-inspired)
+
+Implement in this order, each with a concrete definition:
+
+1. **Projects** — a named collection scoping which documents/sources a conversation can retrieve from. Concretely: a project = {name, list of source IDs, list of conversations}.
+2. **File Attachments in chat** — attach a document to a single message without adding it to the permanent index.
+3. **Multi-file context** — reference multiple sources in one query; retrieval runs across all of them, source cards indicate which source each chunk came from.
+4. **Artifact Panel** — side panel for Code / Markdown / HTML / SQL / JSON with Edit, Save, Export, Copy. Reuse one component; behavior differs only by syntax highlighting and export extension.
+5. **Branch Conversations** — fork a conversation at a chosen message; branches are separate conversation objects sharing history up to the fork point.
+6. **Temporary Chats** — not persisted to disk at all; clearing app state clears them.
+7. **Export Conversations** — Markdown and JSON export of a full thread including cited sources.
+
+Canvas Editing (collaborative live-editing of a document with the model) is **deferred to Phase 7** — it's a distinct, complex feature, not a checkbox alongside artifacts.
+
+---
+
+## 5. Phase 4 — Transparency Features (Claude-inspired)
+
+These are inspectability tools, not chat features — build as a collapsible side panel:
+
+- **Context Usage Meter**: live token count of (system prompt + retrieved chunks + history) vs. model's context limit.
+- **Retrieval Inspector**: for the current answer, show every chunk retrieved, its score, and whether it was actually used in the final answer vs. discarded.
+- **Prompt Pipeline Viewer**: the literal assembled prompt sent to the LLM (system + retrieved context + user turn), read-only, for debugging/trust.
+- **Thinking Modes** (Fast / Balanced / Deep): maps to a concrete backend difference — e.g. Fast = smaller model + top-3 chunks, Balanced = default model + top-6 chunks, Deep = larger local model (or extended reasoning) + top-12 chunks + re-ranking pass. Define the actual mapping before building the UI toggle.
+
+---
+
+## 6. Phase 5 — Research Features (Perplexity-inspired)
+
+- **Source Cards**: already in Phase 1 — extend with confidence scores here.
+- **Source Confidence Scores**: normalize retrieval similarity score to a 0–100 display value; show the formula in a tooltip (users should be able to see *why* a score is what it is).
+- **Related Questions**: generate 3 candidate follow-ups from the LLM based on the answer just given.
+- **Follow-up Suggestions**: same mechanism, surfaced inline vs. in a panel — pick one, don't build both as separate features.
+- **Citation Navigation**: clicking a citation number in the answer text scrolls to/highlights that source card.
+
+---
+
+## 7. Phase 6 — Learning Features (NotebookLM-inspired)
+
+Each of these is "generate structured content from selected sources" — same generation pattern, different output schema and renderer:
+
+- **Study Guides**: LLM-generated structured summary (sections + key points) of selected sources.
+- **Flashcards**: LLM-generated Q/A pairs from selected sources, spaced-repetition review UI.
+- **Quizzes**: LLM-generated multiple-choice/short-answer questions with grading against source content.
+- **Timelines**: extract dated events/claims from sources, render chronologically. Requires date extraction — flag as best-effort, not guaranteed complete.
+- **Mind Maps**: extract key concepts and relationships, render as a 2D node graph (separate from the 3D knowledge graph in Phase 8 — this one is per-source-set, not global).
+- **Audio Overviews**: LLM generates a short script from selected sources → local TTS renders it. Requires local TTS installed (see §1).
+
+**Acceptance criteria for this phase:** pick 3 documents, generate one of each artifact above, confirm each references only the selected 3 documents (not the whole library).
+
+---
+
+## 8. Phase 7 — Advanced Knowledge Intelligence
+
+The original prompt listed 17 features here as bare names. Each is defined below
+using one template — **do not build any of these without filling in this template
+first**, since the name alone is not a spec:
+
+> **Template:** Purpose / Input / Computation / Output / UI surface
+
+- **Duplicate Detection** — Purpose: flag near-identical ingested content. Input: chunk embeddings. Computation: pairwise cosine similarity above threshold (e.g. >0.95) across chunks from different source IDs. Output: list of duplicate pairs. UI: a "Duplicates" tab in Documents module.
+- **Freshness Scoring** — Purpose: surface stale info. Input: source ingestion/last-crawled date. Computation: age-based decay function, configurable per source type (a website is "stale" faster than a PDF). Output: a freshness badge (Fresh/Aging/Stale) per source. UI: badge on source cards.
+- **Confidence Engine** — Purpose: single trust score per answer. Input: retrieval scores + source freshness + source agreement (do multiple sources say the same thing?). Computation: weighted combination, formula must be documented and shown to the user. Output: 0–100 score. UI: shown next to each answer, expandable to show the weighted factors.
+- **Contradiction Detection** — Purpose: flag when two sources disagree. Input: pairs of retrieved chunks on the same topic. Computation: LLM-judged entailment check ("do these two chunks agree, disagree, or are unrelated?") on chunks above a topic-similarity threshold. Output: contradiction pairs with both source citations. UI: a warning inline in chat when detected during retrieval, plus a standalone "Contradictions" report per project.
+- **Knowledge Gap Detection** — Purpose: tell the user what they haven't covered. Input: user's query history + existing source topics (via embedding clustering). Computation: cluster topics in queries that returned low-confidence answers or no results. Output: list of under-covered topics. UI: a widget on the dashboard.
+- **Knowledge Timeline / Time Travel Queries** — Purpose: see how a topic's information evolved. Input: source ingestion dates + extracted claim dates. Computation: same date extraction as Phase 6 Timelines, but scoped globally and queryable ("what did my notes say about X as of March?"). UI: a date-filterable chat mode.
+- **Knowledge Heatmap** — Purpose: visualize which topics are well-covered vs. thin. Input: embedding density per topic cluster. Output: 2D heatmap (topic clusters sized/colored by document count). UI: dashboard widget, clicking a hot area filters the library to that topic.
+- **Cross-Domain Discovery** — Purpose: surface non-obvious connections between unrelated sources. Input: embedding similarity between chunks from sources tagged as different "domains"/projects. Computation: nearest-neighbor search across project boundaries. Output: "these two unrelated documents both discuss X" suggestions. UI: a "Discoveries" feed on the dashboard.
+- **Semantic Bookmarks** — Purpose: save a concept, not just a page. Input: user selects text or a chat answer. Computation: store the embedding + source pointer. Output: a bookmark that can be re-surfaced when semantically related content appears later. UI: bookmark button in chat and document viewer.
+- **Concept Lineage** — Purpose: trace how understanding of a concept built up across sources over time. Input: semantic bookmarks + timeline data for one concept. Output: an ordered chain of sources that mention the concept. UI: a lineage view launched from a concept's node in the graph.
+- **Retrieval Replay** — Purpose: debug/audit — replay exactly what was retrieved for a past answer. Input: stored retrieval log per chat turn (already captured by the Retrieval Inspector in Phase 4). Output: read-only replay view. UI: "Replay" button on any past message.
+- **Goal Tracking / Learning Paths** — Purpose: let a user set a learning goal and track progress. Input: user-defined goal (e.g. "Understand transformers"). Computation: LLM breaks the goal into a checklist of subtopics, checks off subtopics once sources covering them are ingested/queried. Output: progress bar + checklist. UI: a Goals module.
+- **Knowledge DNA** — Purpose: a personal profile of what the user knows/has explored. Input: aggregate of ingested topics + query history. Output: a visual "fingerprint" (e.g. radar chart of topic coverage). UI: dashboard widget; this is analytics, not a new data pipeline.
+- **Debate Mode / Consensus Mode** — Purpose: when sources disagree (surfaced by Contradiction Detection), let the user explore both sides, or ask the system to synthesize a consensus view. Debate Mode: LLM argues each source's position separately, citing it. Consensus Mode: LLM synthesizes a single answer weighting by source confidence/freshness. UI: two buttons that appear only when a contradiction was detected on the current query.
+
+**These are genuinely hard, LLM-judgment-dependent features. Ship 2–3 of them well
+(recommend: Duplicate Detection, Freshness Scoring, Contradiction Detection) before
+attempting the rest — don't build all 17 in parallel.**
+
+---
+
+## 9. Phase 8 — 3D Knowledge Graph
+
+Build last, once there's enough real data to visualize meaningfully.
+
+- Stack: Three.js + React Three Fiber.
+- Node colors: Blue = Documents, Teal = Websites, Coral = Videos, Amber = Images.
+- Edges represent semantic similarity above a threshold (define the threshold; don't connect everything).
+- Clicking a node opens the actual source (PDF, transcript, page, OCR result) — reuses the same "open source" action as source cards elsewhere, not a new viewer.
+- Retrieval pulses: when a chat answer uses a node, animate a brief highlight on it.
+- Performance: target 60fps; Automatic Quality Tier drops edge count/particle effects based on measured frame time, not device sniffing; Reduced Motion Mode disables animation entirely per OS-level user preference.
+
+**Acceptance criteria:** with 200+ ingested sources, graph stays interactive (>30fps minimum) on integrated GPU hardware.
+
+---
+
+## 10. Phase 9 — Productivity, Organization & Trust Infrastructure
+
+The original dashboard list included **Models**, **System Health**, and **Privacy
+Dashboard** as modules but never defined what they do — that gap is closed here,
+alongside other high-value features that make a knowledge base actually pleasant
+to live in day-to-day rather than just powerful in a demo.
+
+- **Command Palette (⌘/Ctrl+K)** — jump to any document, project, chat, or action instantly, in the spirit of the Raycast/Linear references already in the design language. This is the fastest way to make a large library feel manageable.
+- **Tags & Collections** — manual, user-defined organization layered on top of automatic ingestion. Multi-tag per source; a "Smart Collection" is just a saved filter (e.g., tag = "tax" AND type = "PDF").
+- **Highlights & Personal Notes** — select any passage in a source and attach a freeform note. Distinct from Semantic Bookmarks (Phase 7), which are embedding-based; this is the user's own commentary, and it surfaces inline in the Retrieval Inspector whenever that passage is used in an answer.
+- **Reading List / Inbox** — a staging area for saved links/files before full ingestion. Each item has an explicit "Ingest Now" / "Ingest Later" state, so a user can save 20 links without all of them indexing (and consuming compute) immediately.
+- **Trash & Undo** — deleted sources go to a 30-day trash instead of being wiped immediately, with a one-click restore. Deletion should never be a silent, unrecoverable action.
+- **Version History for refreshed sources** — when a website or video is re-crawled, keep the prior version and show a diff (added/removed text) instead of silently overwriting it. Critical for tracking how a source's claims change over time.
+- **Saved Prompts / Templates** — user-defined reusable prompts (e.g., "Summarize as an executive brief," "Extract action items") selectable from a dropdown in the chat composer.
+- **Citation Export Styles** — export cited sources in APA / MLA / Chicago format in addition to the raw source name, for research and academic use.
+- **Hybrid Search with Filters** — combine keyword (BM25) and semantic search, filterable by source type, date range, tag, and project. Pure semantic search alone misses exact-term lookups (names, codes, IDs) that users expect to just work.
+- **Batch Actions** — multi-select sources for bulk tag, delete, reindex, or move-to-project, instead of one-at-a-time only.
+- **Backup & Restore** — one-click export of the entire local knowledge base (vector index + source files + chat history) to a single archive, and restore from it. For a local-first app with no cloud copy, this is the safety net that makes trusting it with real work reasonable.
+- **Models module (spec)** — Purpose: manage local LLM/embedding models. Actions: download or swap a model, view size on disk, benchmark tokens/sec on the user's actual hardware, and set the default model per Thinking Mode (Phase 4).
+- **System Health module (spec)** — Purpose: operational visibility. Shows vector index size, disk usage by source type, embedding queue backlog, CPU/GPU/RAM usage during ingestion, and last backup date/time.
+- **Privacy Dashboard (spec)** — Purpose: build trust through transparency, matching the "privacy-first" claim with something concrete. Shows a log of every network call the app has made (crawl requests, transcript fetches) with timestamp and destination, a plain description of what's stored locally and where on disk, and a one-click "wipe all data" control.
+
+**Acceptance criteria:** a user can find any document via the command palette in under 2 seconds, restore an accidentally-deleted source from trash, and answer "has this app made any network calls I didn't expect?" by looking at one screen.
+
+---
+
+## 11. Design Language
+
+- Visual references: ChatGPT Desktop, Claude Desktop, Linear, Notion, Raycast.
+- Avoid: neon, cyberpunk, hacker-terminal aesthetics, gratuitous motion.
+- One typography and spacing system applied consistently across all modules — do not let each phase invent its own component styling.
+
+---
+
+## 12. What changed from v1, and why
+
+- Turned an unordered feature dump into 8 sequential phases with acceptance criteria, so an implementer (human or AI agent) has a stopping point and a definition of "done" at each stage.
+- Resolved the offline-first vs. website/video/audio features contradiction explicitly (§1.4) instead of leaving it implicit.
+- Replaced 17 one-line feature names in "Advanced Knowledge Features" with an actual Purpose/Input/Computation/Output/UI spec for each, since a name alone can't be implemented consistently by two different builders.
+- Named concrete default technology choices (local LLM runtime, embedding model, vector store) since "local-first" alone doesn't tell an implementer what to install.
+- Moved Canvas Editing out of the Phase 3 checklist and into its own later phase, since it's a materially harder feature than the artifact panel it was previously grouped with.
+- Added Phase 9 (Productivity, Organization & Trust Infrastructure): command palette, tags/collections, highlights & notes, reading list, trash/undo, version history with diffing, saved prompts, citation export styles, hybrid search, batch actions, and backup/restore — plus specs for the Models, System Health, and Privacy Dashboard modules, which the original dashboard list named but never defined.
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-07-04T20:26:50+05:30.
+</ADDITIONAL_METADATA>
